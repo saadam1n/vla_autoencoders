@@ -37,12 +37,11 @@ for real_robot_path in files:
 eef_raw_actions = np.concatenate(all_demos, axis=0)
 
 # FAST normalization
-sorted_coeffs = np.sort(eef_raw_actions, axis=1)
+sorted_coeffs = np.sort(eef_raw_actions, axis=0)
 lower = sorted_coeffs[int(sorted_coeffs.shape[0] * 0.01)]
 upper = sorted_coeffs[int(sorted_coeffs.shape[0] * 0.99)]
 quantile_range = upper - lower
 eef_actions = (eef_raw_actions - lower) / quantile_range
-
 
 print(f"Num demos is {num_demos}")
 
@@ -320,13 +319,23 @@ model = TransformerAutoencoderMHA(num_actions=eef_actions.shape[1], token_dimens
 input = torch.tensor(eef_actions, dtype=torch.float32, device="cuda", requires_grad=True)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-scheduler  = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=128, T_mult=2, eta_min=0.001) if False else torch.optim.lr_scheduler.StepLR(optimizer, step_size=150, gamma=0.9)
+scheduler  = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=128, T_mult=2, eta_min=0.001) if False else torch.optim.lr_scheduler.StepLR(optimizer, step_size=125, gamma=0.9)
 
 num_epochs = 3000
 for i in range(num_epochs):
     optimizer.zero_grad()
 
     output = model(input)
+
+    if i == 500:
+        torch.set_printoptions(precision=5, sci_mode=False)
+
+        error = (output - input)
+        show_coeffs = error
+        print(show_coeffs)
+        print(output)
+        print(input)
+        sys.exit(0)
 
     loss = torch.nn.functional.mse_loss(output, input)
     loss.backward()
