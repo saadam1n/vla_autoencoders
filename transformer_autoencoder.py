@@ -327,16 +327,6 @@ for i in range(num_epochs):
 
     output = model(input)
 
-    if i == 500:
-        torch.set_printoptions(precision=5, sci_mode=False)
-
-        error = (output - input)
-        show_coeffs = error
-        print(show_coeffs)
-        print(output)
-        print(input)
-        sys.exit(0)
-
     loss = torch.nn.functional.mse_loss(output, input)
     loss.backward()
 

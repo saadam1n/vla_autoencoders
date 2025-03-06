@@ -35,7 +35,7 @@ for real_robot_path in files:
 eef_raw_actions = np.concatenate(all_demos, axis=0)
 
 # FAST normalization
-sorted_coeffs = np.sort(eef_raw_actions, axis=1)
+sorted_coeffs = np.sort(eef_raw_actions, axis=0)
 lower = sorted_coeffs[int(sorted_coeffs.shape[0] * 0.01)]
 upper = sorted_coeffs[int(sorted_coeffs.shape[0] * 0.99)]
 quantile_range = upper - lower
