@@ -164,6 +164,9 @@ class TransformerAutoencoderMHA(nn.Module):
         for i in range(self.num_output_tokens):
             raw_next_token = self.positional_encoding[i].expand(x.shape[0], -1).unsqueeze(1)
             
+            if i != 0:
+                raw_next_token = raw_next_token + output_tokens[i - 1]
+
             attended_next_token = self.attention(raw_next_token)
 
             embedding_probabilities = F.softmax(torch.matmul(attended_next_token, self.embedding_matrix).view(-1, self.num_embeddings), dim=1)
