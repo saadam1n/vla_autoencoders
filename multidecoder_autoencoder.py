@@ -53,36 +53,23 @@ class DoubleLayerMLP(nn.Module):
 
         self.latent_channels = in_channels * expansion_ratio
 
-        self.batch_norm = nn.BatchNorm1d(in_channels)
-
         self.mlp = nn.Sequential(
+            nn.BatchNorm1d(in_channels),
             nn.Linear(in_channels, self.latent_channels),
             nn.ReLU(),
             nn.BatchNorm1d(self.latent_channels),
             nn.Linear(self.latent_channels, out_channels)
         )
 
-        self.skip = nn.Linear(in_channels, out_channels)
+        self.skip = nn.Sequential(
+            nn.BatchNorm1d(in_channels),
+            nn.Linear(in_channels, out_channels)
+        )
 
     def forward(self, x):
-        xn = self.batch_norm(x)
-        return self.mlp(xn) + self.skip(xn)
+        return self.mlp(x) + self.skip(x)
     
-    def transpose_output(self, indices):
-        print(f"TPOS PREV {indices.shape}")
-        self.mlp[3].weight.data = self.mlp[3].weight.data[indices, :]
-        self.mlp[3].bias.data = self.mlp[3].bias.data[indices]
-        self.skip.weight.data = self.skip.weight.data[indices, :]
-        self.skip.bias.data = self.skip.bias.data[indices]
 
-    def transpose_input(self, indices):
-        self.mlp[0].weight.data = self.mlp[0].weight.data[:, indices]
-        self.skip.weight.data = self.skip.weight.data[:, indices]
-
-        self.batch_norm.running_mean.data = self.batch_norm.running_mean.data[indices] 
-        self.batch_norm.running_var.data = self.batch_norm.running_var.data[indices] 
-        self.batch_norm.weight.data = self.batch_norm.weight.data[indices]
-        self.batch_norm.bias.data = self.batch_norm.bias.data[indices]
 
 class FSQ(nn.Module):
     def __init__(self, l):
@@ -110,31 +97,25 @@ class ActionAutoencoder(nn.Module):
         self.latent_vector_dim = m
         self.proj_dim = 512
 
-        self.encoder = DoubleLayerMLP(self.flattened_input_dim, self.latent_vector_dim, expansion_ratio=8)
+        self.encoder = nn.Sequential(
+            DoubleLayerMLP(self.flattened_input_dim, self.latent_vector_dim, expansion_ratio=8),
+            FSQ(l)
+        )
 
-        self.fsq = FSQ(l)
-
-        self.decoder = DoubleLayerMLP(self.latent_vector_dim, self.flattened_input_dim, expansion_ratio=8)
-
+        self.decoder = nn.ModuleList([
+            DoubleLayerMLP(i + 1, self.flattened_input_dim, expansion_ratio=8) for i in range(self.latent_vector_dim)
+        ])
 
     def forward(self, x : torch.Tensor):
-        coeffs = self.encode(x)
-        traj = self.decode(coeffs, x)
+        compressed = self.encoder(x.flatten(1))
+        
+        reconstructed = torch.stack([
+            self.decoder[i](compressed[:, :i + 1]).view_as(x) for i in range(self.latent_vector_dim)
+        ], dim=1)
 
-        return traj
+        return reconstructed
     
-    def encode(self, x : torch.Tensor):
-        xf = x.flatten(1)
-        xe = self.encoder(xf)
-        xq = self.fsq(xe)
 
-        return xq
-
-    def decode(self, xq : torch.Tensor, vl):
-        xd = self.decoder(xq)
-        xv = xd.view_as(vl)
-
-        return xv
 
 
 model = ActionAutoencoder(eef_actions.shape[1], 16, 16).to("cuda")
@@ -149,60 +130,11 @@ for i in range(num_epochs):
 
     output = model(input)
 
-    loss = torch.nn.functional.mse_loss(output, input)
+    expanded_input = input.unsqueeze(1).expand(-1,  model.latent_vector_dim, -1, -1)
+
+    loss = torch.nn.functional.mse_loss(output, expanded_input)
     loss.backward()
 
     optimizer.step()
 
-    print(f"Fro loss at epoch {i} was {loss.item()}")
-
-model.eval()
-
-
-def get_value_grad():
-    compressed_coeffs = model.encode(input)
-    compressed_coeffs.retain_grad()
-
-    traj = model.decode(compressed_coeffs, input)
-
-    fake_loss = torch.nn.functional.mse_loss(traj, torch.zeros_like(traj)).backward()
-
-    return compressed_coeffs
-
-value_grad = get_value_grad().grad.abs().sum(dim=0)
-print(value_grad)
-
-_, indices = torch.sort(value_grad, descending=True)
-indices = indices.flatten()
-
-with torch.no_grad():
-    model.encoder.transpose_output(indices)
-    model.decoder.transpose_input(indices)
-
-print(f"Take two: {get_value_grad().grad.abs().sum(dim=0)}")
-
-
-
-
-with torch.no_grad():
-    compressed_coeffs = model.encode(input)
-
-    traj = model.decode(compressed_coeffs, input)
-
-
-
-    error = (traj - input).detach().cpu().numpy()
-
-    fig = plt.figure()
-    ax = fig.add_subplot(projection='3d')
-
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-
-    show_coeffs = compressed_coeffs.detach().cpu().numpy()
-    ax.scatter(xs=show_coeffs[:, 0], ys=show_coeffs[:, 1], zs=show_coeffs[:, 2], s=0.1, marker='o')
-    plt.show()
-
-    ax.scatter(xs=error[:, 0], ys=error[:, 1], zs=error[:, 2], s=0.1, marker='o')
-    plt.show()
+    print(f"Fro loss at epoch {i} was {torch.nn.functional.mse_loss(output[:, -1, :, :], expanded_input[:, -1, :, :]).item()}")
