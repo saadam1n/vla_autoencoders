@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from mlp import DoubleLayerMLP
+
 
 chunk_size = 20
 
@@ -47,42 +49,7 @@ print(f"Num demos is {num_demos}")
 print(f"Found shape {eef_actions.shape}")
 eef_actions = np.reshape(eef_actions, (eef_actions.shape[0] // chunk_size, chunk_size, -1))
 
-class DoubleLayerMLP(nn.Module):
-    def __init__(self, in_channels, out_channels, expansion_ratio):
-        super(DoubleLayerMLP, self).__init__()
 
-        self.latent_channels = in_channels * expansion_ratio
-
-        self.batch_norm = nn.BatchNorm1d(in_channels)
-
-        self.mlp = nn.Sequential(
-            nn.Linear(in_channels, self.latent_channels),
-            nn.ReLU(),
-            nn.BatchNorm1d(self.latent_channels),
-            nn.Linear(self.latent_channels, out_channels)
-        )
-
-        self.skip = nn.Linear(in_channels, out_channels)
-
-    def forward(self, x):
-        xn = self.batch_norm(x)
-        return self.mlp(xn) + self.skip(xn)
-    
-    def transpose_output(self, indices):
-        print(f"TPOS PREV {indices.shape}")
-        self.mlp[3].weight.data = self.mlp[3].weight.data[indices, :]
-        self.mlp[3].bias.data = self.mlp[3].bias.data[indices]
-        self.skip.weight.data = self.skip.weight.data[indices, :]
-        self.skip.bias.data = self.skip.bias.data[indices]
-
-    def transpose_input(self, indices):
-        self.mlp[0].weight.data = self.mlp[0].weight.data[:, indices]
-        self.skip.weight.data = self.skip.weight.data[:, indices]
-
-        self.batch_norm.running_mean.data = self.batch_norm.running_mean.data[indices] 
-        self.batch_norm.running_var.data = self.batch_norm.running_var.data[indices] 
-        self.batch_norm.weight.data = self.batch_norm.weight.data[indices]
-        self.batch_norm.bias.data = self.batch_norm.bias.data[indices]
 
 class FSQ(nn.Module):
     def __init__(self, l):

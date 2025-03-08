@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from mlp import DoubleLayerMLP
 
 chunk_size = 20
 
@@ -47,27 +48,6 @@ print(f"Num demos is {num_demos}")
 print(f"Found shape {eef_actions.shape}")
 eef_actions = np.reshape(eef_actions, (eef_actions.shape[0] // chunk_size, chunk_size, -1))
 
-class DoubleLayerMLP(nn.Module):
-    def __init__(self, in_channels, out_channels, expansion_ratio):
-        super(DoubleLayerMLP, self).__init__()
-
-        self.latent_channels = in_channels * expansion_ratio
-
-        self.mlp = nn.Sequential(
-            nn.BatchNorm1d(in_channels),
-            nn.Linear(in_channels, self.latent_channels),
-            nn.ReLU(),
-            nn.BatchNorm1d(self.latent_channels),
-            nn.Linear(self.latent_channels, out_channels)
-        )
-
-        self.skip = nn.Sequential(
-            nn.BatchNorm1d(in_channels),
-            nn.Linear(in_channels, out_channels)
-        )
-
-    def forward(self, x):
-        return self.mlp(x) + self.skip(x)
     
 
 

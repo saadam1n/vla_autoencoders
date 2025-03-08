@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import math
 import time
 import sys
+from mlp import DoubleLayerMLP
 
 chunk_size = 20
 
@@ -48,31 +49,6 @@ print(f"Num demos is {num_demos}")
 print(f"Found shape {eef_actions.shape}")
 eef_actions = np.reshape(eef_actions, (eef_actions.shape[0] // chunk_size, chunk_size, -1))
 
-class DoubleLayerMLP(nn.Module):
-    def __init__(self, in_channels, out_channels, expansion_ratio, NormLayerType = nn.BatchNorm1d):
-        super(DoubleLayerMLP, self).__init__()
-
-        self.latent_channels = in_channels * expansion_ratio
-
-        self.batch_norm = NormLayerType(in_channels)
-
-        self.mlp = nn.Sequential(
-            NormLayerType(in_channels),
-            nn.Linear(in_channels, self.latent_channels),
-            nn.ReLU(),
-            NormLayerType(self.latent_channels),
-            nn.Linear(self.latent_channels, out_channels)
-        )
-
-        self.skip = nn.Sequential(
-            NormLayerType(in_channels),
-            nn.Linear(in_channels, out_channels)
-        )
-
-    def forward(self, x):
-        xn = self.batch_norm(x)
-        return self.mlp(xn) + self.skip(xn)
-
 class MultiHeadCasualAttention(nn.Module):
     def __init__(self, input_embedding_dim, num_heads, head_dim):
         super(MultiHeadCasualAttention, self).__init__()
@@ -99,7 +75,7 @@ class MultiHeadCasualAttention(nn.Module):
 
         self.head_aggregator = nn.Linear(self.all_head_dim, input_embedding_dim)
 
-        self.mlp = DoubleLayerMLP(input_embedding_dim, input_embedding_dim, expansion_ratio=2, NormLayerType=nn.LayerNorm)
+        self.mlp = DoubleLayerMLP(input_embedding_dim, input_embedding_dim, expansion_ratio=2, norm_layer=nn.LayerNorm)
 
     def forward(self, input_tokens):
         attended = self.mha(input_tokens)
@@ -185,6 +161,9 @@ class TransformerAutoencoderMHA(nn.Module):
         output_tokens = []
         for i in range(self.num_output_tokens):
             raw_next_token = self.positional_encoding[i].expand(x.shape[0], -1).unsqueeze(1)
+
+            if i != 0:
+                raw_next_token = raw_next_token + output_tokens[i - 1]
 
             attended_next_token = self.attention(raw_next_token)
 
@@ -332,6 +311,6 @@ for i in range(num_epochs):
 
     optimizer.step()
 
-    print(f"Fro loss at epoch {i} was {math.sqrt(loss.item())}")
+    print(f"Fro loss at epoch {i} was {loss.item()}")
 
 
