@@ -6,49 +6,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from mlp import DoubleLayerMLP
+from data_stuff import ActionChunkDataset
 
 chunk_size = 20
-
-files = ["low_dim_v141(4).hdf5", "low_dim_v141(3).hdf5", "low_dim_v141(2).hdf5", "low_dim_v141(1).hdf5", "low_dim_v141.hdf5"]
-
-real_robot_path = "low_dim_v141(4).hdf5"
-
-num_demos = 0
-
-all_demos = []
-
-for real_robot_path in files:
-    with h5py.File(real_robot_path, 'r') as f:
-        for demo in f['data']:
-            num_demos += 1
-
-            demo_pos = f['data'][demo]['obs']['robot0_eef_pos'][:]
-            demo_rot = f['data'][demo]['obs']['robot0_eef_quat'][:]
-
-            demo_eef_actions = np.concatenate((demo_pos, demo_rot), axis=1)
-
-            total_num_chunks = ((demo_eef_actions.shape[0] - 1) // chunk_size + 1)
-            round_up_size = chunk_size * total_num_chunks - demo_eef_actions.shape[0]
-
-            all_demos.append(demo_eef_actions)
-            all_demos.append(np.zeros((round_up_size, demo_eef_actions.shape[1])))
-
-eef_raw_actions = np.concatenate(all_demos, axis=0)
-
-# FAST normalization
-sorted_coeffs = np.sort(eef_raw_actions, axis=0)
-lower = sorted_coeffs[int(sorted_coeffs.shape[0] * 0.01)]
-upper = sorted_coeffs[int(sorted_coeffs.shape[0] * 0.99)]
-quantile_range = upper - lower
-eef_actions = (eef_raw_actions - lower) / quantile_range
-
-
-print(f"Num demos is {num_demos}")
-
-print(f"Found shape {eef_actions.shape}")
-eef_actions = np.reshape(eef_actions, (eef_actions.shape[0] // chunk_size, chunk_size, -1))
-
-    
 
 
 class FSQ(nn.Module):
@@ -98,23 +58,66 @@ class ActionAutoencoder(nn.Module):
 
 
 
-model = ActionAutoencoder(eef_actions.shape[1], 16, 16).to("cuda")
-input = torch.tensor(eef_actions, dtype=torch.float32, device="cuda", requires_grad=True)
+model = ActionAutoencoder(20, 16, 16).to("cuda")
+acds = ActionChunkDataset()
+dataloader = torch.utils.data.DataLoader(
+    acds,
+    batch_size=256,
+    shuffle=True
+)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=0.03)
-scheduler  = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=128, T_mult=2, eta_min=0.001) if False else torch.optim.lr_scheduler.StepLR(optimizer, step_size=150, gamma=0.9)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
+scheduler  = torch.optim.lr_scheduler.StepLR(optimizer, step_size=4, gamma=0.85)
 
-num_epochs = 3000
+num_epochs = 128
 for i in range(num_epochs):
-    optimizer.zero_grad()
 
-    output = model(input)
+    print(f"Processing training for epoch {i}")
 
-    expanded_input = input.unsqueeze(1).expand(-1,  model.latent_vector_dim, -1, -1)
+    model.train()
+    acds.train_mode = True
+    for j, sample in enumerate(dataloader):
+        optimizer.zero_grad()
 
-    loss = torch.nn.functional.mse_loss(output, expanded_input)
-    loss.backward()
+        sample = sample.to("cuda")
 
-    optimizer.step()
+        output = model(sample)
+        sample = sample.unsqueeze(1).expand_as(output)
 
-    print(f"Fro loss at epoch {i} was {torch.nn.functional.mse_loss(output[:, -1, :, :], expanded_input[:, -1, :, :]).item()}")
+        loss = torch.nn.functional.l1_loss(output, sample)
+        loss.backward()
+
+        optimizer.step()
+
+        #print(f"\tL1 loss in btach {j} was {loss.item()}")
+
+    print()
+
+    print(f"Processing eval for epoch {i}")
+
+    total_loss = 0.0
+    num_eval_samples = 0
+
+    model.eval()
+    acds.train_mode = False
+    for j, sample in enumerate(dataloader):
+        optimizer.zero_grad()
+
+        sample = sample.to("cuda")
+        output = model(sample)[:, 15]
+
+
+        loss = torch.nn.functional.mse_loss(output, sample)
+        loss.backward()
+
+        optimizer.step()
+
+        #print(f"\tL2 loss in batch {j} was {loss.item()}")
+        total_loss += loss.item() * output.shape[0]
+        num_eval_samples += output.shape[0]
+
+    print(f"Average L2 loss across all eval samples was {total_loss / num_eval_samples}")
+
+    print("\n\n\n")
+
+

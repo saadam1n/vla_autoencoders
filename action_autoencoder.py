@@ -5,51 +5,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+
+import torch.utils
+import torch.utils.data
 from mlp import DoubleLayerMLP
+from data_stuff import ActionChunkDataset
 
 
 chunk_size = 20
-
-files = ["low_dim_v141(4).hdf5", "low_dim_v141(3).hdf5", "low_dim_v141(2).hdf5", "low_dim_v141(1).hdf5", "low_dim_v141.hdf5"]
-
-real_robot_path = "low_dim_v141(4).hdf5"
-
-num_demos = 0
-
-all_demos = []
-
-for real_robot_path in files:
-    with h5py.File(real_robot_path, 'r') as f:
-        for demo in f['data']:
-            num_demos += 1
-
-            demo_pos = f['data'][demo]['obs']['robot0_eef_pos'][:]
-            demo_rot = f['data'][demo]['obs']['robot0_eef_quat'][:]
-
-            demo_eef_actions = np.concatenate((demo_pos, demo_rot), axis=1)
-
-            total_num_chunks = ((demo_eef_actions.shape[0] - 1) // chunk_size + 1)
-            round_up_size = chunk_size * total_num_chunks - demo_eef_actions.shape[0]
-
-            all_demos.append(demo_eef_actions)
-            all_demos.append(np.zeros((round_up_size, demo_eef_actions.shape[1])))
-
-eef_raw_actions = np.concatenate(all_demos, axis=0)
-
-# FAST normalization
-sorted_coeffs = np.sort(eef_raw_actions, axis=0)
-lower = sorted_coeffs[int(sorted_coeffs.shape[0] * 0.01)]
-upper = sorted_coeffs[int(sorted_coeffs.shape[0] * 0.99)]
-quantile_range = upper - lower
-eef_actions = (eef_raw_actions - lower) / quantile_range
-
-
-print(f"Num demos is {num_demos}")
-
-print(f"Found shape {eef_actions.shape}")
-eef_actions = np.reshape(eef_actions, (eef_actions.shape[0] // chunk_size, chunk_size, -1))
-
-
 
 class FSQ(nn.Module):
     def __init__(self, l):
@@ -104,72 +67,66 @@ class ActionAutoencoder(nn.Module):
         return xv
 
 
-model = ActionAutoencoder(eef_actions.shape[1], 16, 16).to("cuda")
-input = torch.tensor(eef_actions, dtype=torch.float32, device="cuda", requires_grad=True)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=0.03)
-scheduler  = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=128, T_mult=2, eta_min=0.001) if False else torch.optim.lr_scheduler.StepLR(optimizer, step_size=150, gamma=0.9)
+model = ActionAutoencoder(20, 16, 16).to("cuda")
 
-num_epochs = 3000
+acds = ActionChunkDataset()
+dataloader = torch.utils.data.DataLoader(
+    acds,
+    batch_size=256,
+    shuffle=True
+)
+
+optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
+scheduler  = torch.optim.lr_scheduler.StepLR(optimizer, step_size=4, gamma=0.85)
+
+num_epochs = 128
 for i in range(num_epochs):
-    optimizer.zero_grad()
 
-    output = model(input)
+    print(f"Processing training for epoch {i}")
 
-    loss = torch.nn.functional.mse_loss(output, input)
-    loss.backward()
+    model.train()
+    acds.train_mode = True
+    for j, sample in enumerate(dataloader):
+        optimizer.zero_grad()
 
-    optimizer.step()
+        sample = sample.to("cuda")
 
-    print(f"Fro loss at epoch {i} was {loss.item()}")
+        output = model(sample)
 
-model.eval()
+        loss = torch.nn.functional.l1_loss(output, sample)
+        loss.backward()
 
+        optimizer.step()
 
-def get_value_grad():
-    compressed_coeffs = model.encode(input)
-    compressed_coeffs.retain_grad()
+        #print(f"\tL1 loss in btach {j} was {loss.item()}")
 
-    traj = model.decode(compressed_coeffs, input)
+    print()
 
-    fake_loss = torch.nn.functional.mse_loss(traj, torch.zeros_like(traj)).backward()
+    print(f"Processing eval for epoch {i}")
 
-    return compressed_coeffs
+    total_loss = 0.0
+    num_eval_samples = 0
 
-value_grad = get_value_grad().grad.abs().sum(dim=0)
-print(value_grad)
+    model.eval()
+    acds.train_mode = False
+    for j, sample in enumerate(dataloader):
+        optimizer.zero_grad()
 
-_, indices = torch.sort(value_grad, descending=True)
-indices = indices.flatten()
+        sample = sample.to("cuda")
+        output = model(sample)
 
-with torch.no_grad():
-    model.encoder.transpose_output(indices)
-    model.decoder.transpose_input(indices)
+        loss = torch.nn.functional.mse_loss(output, sample)
+        loss.backward()
 
-print(f"Take two: {get_value_grad().grad.abs().sum(dim=0)}")
+        optimizer.step()
 
+        #print(f"\tL2 loss in batch {j} was {loss.item()}")
+        total_loss += loss.item() * output.shape[0]
+        num_eval_samples += output.shape[0]
 
+    print(f"Average L2 loss across all eval samples was {total_loss / num_eval_samples}")
 
+    print("\n\n\n")
 
-with torch.no_grad():
-    compressed_coeffs = model.encode(input)
-
-    traj = model.decode(compressed_coeffs, input)
-
-
-
-    error = (traj - input).detach().cpu().numpy()
-
-    fig = plt.figure()
-    ax = fig.add_subplot(projection='3d')
-
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-
-    show_coeffs = compressed_coeffs.detach().cpu().numpy()
-    ax.scatter(xs=show_coeffs[:, 0], ys=show_coeffs[:, 1], zs=show_coeffs[:, 2], s=0.1, marker='o')
-    plt.show()
-
-    ax.scatter(xs=error[:, 0], ys=error[:, 1], zs=error[:, 2], s=0.1, marker='o')
-    plt.show()
+print("OUTPUT FOR LINEAR NT!")
