@@ -9,7 +9,7 @@ class ActionChunkDataset(torch.utils.data.Dataset):
 
         print(f"Traing data shape is {self.all_chunks.shape}")
 
-        if False:
+        if True:
             sorted_chunks, _ = torch.sort(self.all_chunks.flatten(0, 1), dim=0)
 
             lower = sorted_chunks[int(0.01 * sorted_chunks.shape[0])]
@@ -22,6 +22,8 @@ class ActionChunkDataset(torch.utils.data.Dataset):
             print(f"\trange: {range}")
 
             self.all_chunks = (self.all_chunks - lower) / range
+            self.all_chunks = 2 * self.all_chunks - 1
+            self.all_chunks = torch.clamp(self.all_chunks, -1, 1)
         else:
             flattened_chunks = self.all_chunks.flatten(0, 1)
             var, mean = torch.var_mean(flattened_chunks, dim=0)
@@ -40,7 +42,7 @@ class ActionChunkDataset(torch.utils.data.Dataset):
 
             self.all_chunks = (self.all_chunks - mean) / std
 
-            check_var, check_mean = torch.var_mean(self.all_chunks.flatten(0, 1))
+            check_var, check_mean = torch.var_mean(self.all_chunks.flatten(0, 1), dim=0)
 
             print("Check stats:")
             print(f"\tmean: {check_mean}")
@@ -60,4 +62,3 @@ class ActionChunkDataset(torch.utils.data.Dataset):
             return int(0.95 * self.all_chunks.shape[0])
         else:
             return int(0.05 * self.all_chunks.shape[0])
-    

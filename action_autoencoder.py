@@ -68,7 +68,7 @@ class ActionAutoencoder(nn.Module):
 
 
 
-model = ActionAutoencoder(20, 16, 16).to("cuda")
+model = ActionAutoencoder(20, 12, 1024).to("cuda")
 
 acds = ActionChunkDataset()
 dataloader = torch.utils.data.DataLoader(
