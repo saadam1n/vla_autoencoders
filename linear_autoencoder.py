@@ -6,14 +6,84 @@ import torch.optim as optim
 from data_stuff import ActionChunkDataset
 from transformers import AutoProcessor
 
+class FeedForwardSwiGLU(nn.Module):
+    """Some Information about FeedForwardSwiGLU"""
+    def __init__(self, features_in, features_out, expansion_ratio):
+        super(FeedForwardSwiGLU, self).__init__()
+
+        features_latent = expansion_ratio * max(features_in, features_out)
+
+        self.swish_linear = nn.Sequential(
+            nn.BatchNorm1d(features_in),
+            nn.Linear(features_in, features_latent)
+        )
+
+        self.swish_beta = nn.Parameter(torch.randn(features_latent))
+
+        self.gated_linear = nn.Sequential(
+            nn.BatchNorm1d(features_in),
+            nn.Linear(features_in, features_latent)
+        )
+
+        self.output_linear = nn.Sequential(
+            nn.BatchNorm1d(features_latent),
+            nn.Linear(features_latent, features_out)
+        )
+
+        self.skip_linear = nn.Sequential(
+            nn.BatchNorm1d(features_in),
+            nn.Linear(features_in, features_out)
+        ) if features_in != features_out else None
+
+
+    def forward(self, x : torch.Tensor):
+
+        swin = self.swish_linear(x)
+        swish = swin * F.sigmoid(self.swish_beta * swin)
+
+        gated = self.gated_linear(x)
+
+        skip = x if self.skip_linear is None else self.skip_linear(x)
+        output = self.output_linear(gated * swish) + skip
+
+        return output
+
+
+class FeedForwardReLU(nn.Module):
+    """Some Information about FeedForwardReLU"""
+    def __init__(self, features_in, features_out, expansion_ratio):
+        super(FeedForwardReLU, self).__init__()
+
+        features_latent = expansion_ratio * max(features_in, features_out)
+
+        self.ffn = nn.Sequential(
+            nn.BatchNorm1d(features_in),
+            nn.Linear(features_in, features_latent),
+            nn.ReLU(),
+            nn.Linear(features_latent, features_out)
+        )
+
+
+        self.skip_linear = nn.Sequential(
+            nn.BatchNorm1d(features_in),
+            nn.Linear(features_in, features_out)
+        ) if features_in != features_out else None
+
+    def forward(self, x):
+        skip = x if self.skip_linear is None else self.skip_linear(x)
+        output = self.ffn(x) + skip
+
+        return output
+
+
 class FiniteScalarQuantization(nn.Module):
     def __init__(self, num_bins):
         super(FiniteScalarQuantization, self).__init__()
 
-        self.quantization_granularity = num_bins
+        self.quantization_granularity = num_bins - 1
 
     def forward(self, x: torch.Tensor):
-        z = x.tanh() * self.quantization_granularity / 2.0
+        z = F.sigmoid(x) * self.quantization_granularity
 
         zhat = z + (z.round() - z).detach()
 
@@ -34,22 +104,7 @@ class LinearAutoencoder(nn.Module):
         self.num_tokens = num_tokens
         self.total_chunk_size = self.action_dim * self.time_horizon
 
-        # short for conv expansion ration
-
-        self.encoder_ffn = nn.Sequential(
-            nn.BatchNorm1d(self.total_chunk_size),
-            nn.Linear(self.total_chunk_size, 8 * self.total_chunk_size),
-            nn.ReLU(),
-            #nn.Dropout(),
-            nn.BatchNorm1d(8 * self.total_chunk_size),
-            nn.Linear(8 * self.total_chunk_size, self.num_tokens) # switch output rows/bias
-        )
-
-
-        self.encoder_skip = nn.Sequential(
-            nn.BatchNorm1d(self.total_chunk_size),
-            nn.Linear(self.total_chunk_size, self.num_tokens), # switch output rows/bias
-        )
+        self.encoder = FeedForwardReLU(features_in=self.total_chunk_size, features_out=self.num_tokens, expansion_ratio=8)
 
 
         self.fsq = nn.Sequential(
@@ -57,19 +112,7 @@ class LinearAutoencoder(nn.Module):
             FiniteScalarQuantization(self.vocab_size),
         )
 
-        self.decoder_ffn = nn.Sequential(
-            nn.BatchNorm1d(self.num_tokens), # switch running_mean and var
-            nn.Linear(self.num_tokens, 8 * self.total_chunk_size), # switch columns only
-            nn.ReLU(),
-            #nn.Dropout(),
-            nn.BatchNorm1d(8 * self.total_chunk_size),
-            nn.Linear(8 * self.total_chunk_size, self.total_chunk_size)
-        )
-
-        self.decoder_skip = nn.Sequential(
-            nn.BatchNorm1d(self.num_tokens), # switch running_mean and var
-            nn.Linear(self.num_tokens, self.total_chunk_size) # switch columns only
-        )
+        self.decoder = FeedForwardReLU(features_in=self.num_tokens, features_out=self.total_chunk_size, expansion_ratio=8)
 
     def forward(self, x : torch.Tensor):
         # x is (N, L, C) format
@@ -85,14 +128,14 @@ class LinearAutoencoder(nn.Module):
     def encode(self, x : torch.Tensor):
         xf = x.flatten(1)
 
-        xe = self.encoder_ffn(xf) + self.encoder_skip(xf)
+        xe = self.encoder(xf)
 
         xq = self.fsq(xe)
 
         return xq
     
     def decode(self, xq : torch.Tensor):
-        xd = self.decoder_ffn(xq)# + self.decoder_skip(xq)
+        xd = self.decoder(xq)
 
         return xd
     
@@ -100,17 +143,20 @@ class LinearAutoencoder(nn.Module):
         print(f"TRANSPOSITON SHAPE {indices.shape}")
         print(f"\tVAL{indices}")
 
+        """
         self.encoder_ffn[4].weight.data = self.encoder_ffn[4].weight.data[indices, :]
         self.encoder_ffn[4].bias.data = self.encoder_ffn[4].bias.data[indices]
 
         self.encoder_skip[1].weight.data = self.encoder_skip[1].weight.data[indices, :]
         self.encoder_skip[1].bias.data = self.encoder_skip[1].bias.data[indices]
+        """
 
         self.fsq[0].running_mean.data = self.fsq[0].running_mean.data[indices]
         self.fsq[0].running_var.data = self.fsq[0].running_var.data[indices]
         self.fsq[0].weight.data = self.fsq[0].weight.data[indices]
         self.fsq[0].bias.data = self.fsq[0].bias.data[indices]
     
+        """
         self.decoder_ffn[0].running_mean.data = self.decoder_ffn[0].running_mean.data[indices]
         self.decoder_ffn[0].running_var.data = self.decoder_ffn[0].running_var.data[indices]
         self.decoder_ffn[0].weight.data = self.decoder_ffn[0].weight.data[indices]
@@ -122,26 +168,27 @@ class LinearAutoencoder(nn.Module):
         self.decoder_skip[0].weight.data = self.decoder_skip[0].weight.data[indices]
         self.decoder_skip[0].bias.data = self.decoder_skip[0].bias.data[indices]
         self.decoder_skip[1].weight.data = self.decoder_skip[1].weight.data[:, indices]
+        """
 
 
 acds = ActionChunkDataset()
 dataloader = torch.utils.data.DataLoader(
     acds,
-    batch_size=256,
+    batch_size=512,
     shuffle=True
 )
 
 f = open("data/results.csv", "w")
 f.write("vocab_size,\tnum_tokens,\tMSE_loss,\tbpe_num_tokens,\tbpe_MSE_loss\n")
 f.flush()
-for vocab_size in [16, 64, 256, 1024]:
-    for num_tokens in [4, 8, 12, 16, 24]:
+for vocab_size in [2]:#[16, 64, 256, 1024]:
+    for num_tokens in [48]:#[4, 8, 12, 16, 24]:
         print(f"PROCESSING CONFIG VOCAB_SIZE={vocab_size}, NUM_TOKENS={num_tokens}")
 
         model = LinearAutoencoder(time_horizon=20, action_dim=7, vocab_size=vocab_size, num_tokens=num_tokens).to("cuda")
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-        scheduler  = torch.optim.lr_scheduler.StepLR(optimizer, step_size=4, gamma=0.85)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.002)
+        scheduler  = torch.optim.lr_scheduler.StepLR(optimizer, step_size=8, gamma=0.9)
 
         num_epochs = 128
         for i in range(num_epochs):
