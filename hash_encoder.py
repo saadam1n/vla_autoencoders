@@ -29,16 +29,19 @@ class HashEncoder:
             self.mappings[self.hash_chunk(np_chunks[i])].append(i)
 
     def hash_chunk(self, chunk : np.ndarray) -> int:
+        # utilize FSQ-like quanitzation
         dct_chunk = dct2(chunk)
-
-
+        dct_chunk = np.tanh(dct_chunk)
         qdct_chunk = (dct_chunk * self.qbins // 2)
 
-        qdct_chunk = qdct_chunk.astype(np.int32).clip(-self.qbins // 2, self.qbins // 2).flatten()
+        # round and clip
+        qdct_chunk = (qdct_chunk + 0.5).astype(np.int32)
+        qdct_chunk = qdct_chunk.clip(-self.qbins // 2, self.qbins // 2)
 
-        used_primes = self.primes[:qdct_chunk.size]
+        # use lower frequency components only 
+        qdct_chunk = qdct_chunk[:3]
 
-        hash = np.bitwise_xor.reduce(qdct_chunk * used_primes, axis=0).item() % self.num_entries
+        hash = np.bitwise_xor.reduce(qdct_chunk.flatten() * self.primes[:qdct_chunk.size], axis=0).item() % self.num_entries
 
         return hash
 
@@ -51,18 +54,147 @@ class HashEncoder:
         return self.mappings[self.hash_chunk(np_chunk)]
 
 
+# hash map is immutable, so we insert all chunks upon creation
+class MultiFrequencyHashEncoder:
+    def __init__(
+            self, 
+            time_horizon : int,
+            # low and high frequency num entries
+            lfne : int, 
+            hfne : int,
+            # low and high requency quantization bins
+            lfqb : int,
+            hfqb : int, 
+            # channel divider
+            chnl_div : int,
+            primes : torch.Tensor, 
+            chunks : torch.Tensor
+        ):
+        
+        self.chnl_div = chnl_div
+        self.time_horizon = time_horizon
+        self.sep_dct = True
+
+        self.lfne = lfne
+        self.hfne = hfne
+
+        self.lfqb = lfqb
+        self.hfqb = hfqb
+        self.qbins = np.concatenate(
+            (
+                np.full((self.chnl_div, 1), fill_value=self.lfqb),
+                np.full((self.time_horizon - self.chnl_div, 1), fill_value=self.hfqb),
+            ),
+            axis=0
+        )
+
+        self.rqbins = np.right_shift(self.qbins, 1)
+
+        self.lfm = [ None for _ in range(self.lfne)]
+        self.hfm = [ None for _ in range(self.hfne)]
+
+
+        self.primes = primes.detach().cpu().numpy()
+
+        num_chunks = chunks.shape[0]
+        np_chunks = chunks.detach().cpu().numpy()
+
+        for i in tqdm.tqdm(range(num_chunks)):
+            lfi, hfi, lfdct, hfdct = self.hash_chunk(np_chunks[i])
+
+            self.lfm[lfi] = lfdct
+            self.hfm[hfi] = hfdct
+
+    def hash_chunk(self, chunk : np.ndarray) -> int:
+        # utilize FSQ-like quanitzation
+        if self.sep_dct:
+            coeffs = dct2(chunk[1:, :])
+            dct_chunk = np.concatenate((chunk[:1, :], coeffs), axis=0)
+
+            qdct_in = dct_chunk
+        else:
+            dct_chunk = dct2(chunk)
+
+            qdct_in = np.tanh(dct_chunk)
+        
+        qdct_chunk = (qdct_in * self.rqbins)
+
+        # round and clip
+        qdct_chunk = (qdct_chunk + np.where(qdct_chunk < 0, -0.5, 0.5)).astype(np.int32)
+        qdct_chunk = qdct_chunk.clip(-self.rqbins, self.rqbins)
+
+        # use lower frequency components only 
+        lfdct = qdct_chunk[:self.chnl_div]
+        hfdct = qdct_chunk[self.chnl_div:]
+
+        lfi = np.bitwise_xor.reduce(lfdct.flatten() * self.primes[:lfdct.size], axis=0).item() % self.lfne
+        hfi = np.bitwise_xor.reduce(hfdct.flatten() * self.primes[lfdct.size:], axis=0).item() % self.hfne
+
+        # we save the non-quanitized DCT chunks in our mappings
+        return lfi, hfi, dct_chunk[:self.chnl_div], dct_chunk[self.chnl_div:]
+
+    """
+    Returns indices of which action chunks may map to this chunk
+    """
+    def fetch(self, chunk : torch.Tensor) -> list[int]:
+        np_chunk = chunk.detach().cpu().numpy()
+
+        lfi, hfi, a, b = self.hash_chunk(np_chunk)
+
+        lfc = self.lfm[lfi] if True else a
+        hfc = self.hfm[hfi] if False else b
+
+        if self.sep_dct:
+            resid = dct2_inv(hfc)
+
+            traj = np.concatenate((lfc, resid), axis=0)
+
+            traj = np.cumsum(traj, axis=0)
+        else:
+            #dct = np.concatenate((self.lfm[lfi], self.hfm[hfi]), axis=0)
+            dct = np.concatenate((lfc, np.zeros_like(hfc)), axis=0)
+
+            traj = dct2_inv(dct)
+
+        return torch.from_numpy(traj)
+
+
 
 acds = ActionChunkDataset()
 
+resid = acds.residuals()
+
+# disable sci mode and print 6 digits
+np.set_printoptions(precision=6, suppress=True)
 
 # comment to change between single hashing and multi hashing
-if False:
+if True:
+    print(f"Using multifreq hash encoding")
+
+    mfhe = MultiFrequencyHashEncoder(
+        time_horizon=20,
+        lfne=4096,
+        hfne=8192,
+        lfqb=5,
+        hfqb=32,
+        chnl_div=1,
+        primes=hash_primes[0],
+        chunks=resid
+    )
+
+    reconstructed = torch.stack([
+        mfhe.fetch(resid[i]) for i in tqdm.tqdm(range(resid.shape[0]))
+    ])
+
+
+    """
     print(f"Using single hash encoding")
     he = HashEncoder(num_entries=4096, qbins=16, primes=hash_primes[0], chunks=acds.all_chunks)
 
     reconstructed = torch.stack([
         acds.all_chunks[he.fetch(acds.all_chunks[i])[0]] for i in range(acds.all_chunks.shape[0])
     ])
+    """
 else:
     print(f"Using multi hash encoding")
 

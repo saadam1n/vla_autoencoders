@@ -49,6 +49,8 @@ class ActionChunkDataset(torch.utils.data.Dataset):
             print(f"\tvar : {check_var}")
 
 
+
+
         self.train_mode = False
 
     def __getitem__(self, index):
@@ -62,3 +64,12 @@ class ActionChunkDataset(torch.utils.data.Dataset):
             return int(0.95 * self.all_chunks.shape[0])
         else:
             return int(0.05 * self.all_chunks.shape[0])
+        
+    def residuals(self) -> torch.Tensor:
+        base = self.all_chunks[:, :1, :]
+
+        resid = torch.diff(self.all_chunks, dim=1)
+
+        packed = torch.cat((base, resid), dim=1)
+
+        return packed
