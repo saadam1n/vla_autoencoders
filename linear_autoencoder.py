@@ -48,18 +48,37 @@ class FeedForwardSwiGLU(nn.Module):
 
         return output
 
+class RoundLU(nn.Module):
+    """Some Information about RoundLU"""
+    def __init__(self, num_features, vocab_size):
+        super(RoundLU, self).__init__()\
+        
+        print("Utilizing RoundLU module!")
+
+        self.act_mid = num_features // 2
+        self.fsq = FiniteScalarQuantization(vocab_size)
+
+    def forward(self, x):
+
+        xrelu = F.relu(x[:, :self.act_mid])
+        xfsq = self.fsq(x[:, self.act_mid:])
+
+        xact = torch.cat((xrelu, xfsq), dim=1)
+
+        return xact
+
 
 class FeedForwardReLU(nn.Module):
     """Some Information about FeedForwardReLU"""
-    def __init__(self, features_in, features_out, expansion_ratio):
+    def __init__(self, features_in, features_out, expansion_ratio, roundlu_vocab = None):
         super(FeedForwardReLU, self).__init__()
 
         features_latent = expansion_ratio * max(features_in, features_out)
 
-        self.ffn = nn.Sequential(
+        self.feed_forward = nn.Sequential(
             nn.BatchNorm1d(features_in),
             nn.Linear(features_in, features_latent),
-            nn.ReLU(),
+            nn.ReLU() if roundlu_vocab is None else RoundLU(features_latent, roundlu_vocab),
             nn.Linear(features_latent, features_out)
         )
 
@@ -71,7 +90,7 @@ class FeedForwardReLU(nn.Module):
 
     def forward(self, x):
         skip = x if self.skip_linear is None else self.skip_linear(x)
-        output = self.ffn(x) + skip
+        output = self.feed_forward(x) + skip
 
         return output
 
@@ -83,7 +102,7 @@ class FiniteScalarQuantization(nn.Module):
         self.quantization_granularity = num_bins - 1
 
     def forward(self, x: torch.Tensor):
-        z = F.sigmoid(x) * self.quantization_granularity
+        z = x.tanh() * self.quantization_granularity
 
         zhat = z + (z.round() - z).detach()
 
@@ -95,7 +114,7 @@ class LinearAutoencoder(nn.Module):
     time_horizon - number of actions within action chunk
     action_dim - number of dims per action
     """
-    def __init__(self, time_horizon, action_dim, vocab_size, num_tokens):
+    def __init__(self, time_horizon, action_dim, vocab_size, num_tokens, roundlu_vocab = None):
         super(LinearAutoencoder, self).__init__()
 
         self.action_dim = action_dim
@@ -103,8 +122,9 @@ class LinearAutoencoder(nn.Module):
         self.vocab_size = vocab_size
         self.num_tokens = num_tokens
         self.total_chunk_size = self.action_dim * self.time_horizon
+        self.roundlu_vocab = None
 
-        self.encoder = FeedForwardReLU(features_in=self.total_chunk_size, features_out=self.num_tokens, expansion_ratio=8)
+        self.encoder = FeedForwardReLU(features_in=self.total_chunk_size, features_out=self.num_tokens, expansion_ratio=8, roundlu_vocab=self.roundlu_vocab)
 
 
         self.fsq = nn.Sequential(
@@ -123,10 +143,13 @@ class LinearAutoencoder(nn.Module):
 
         xd = self.decode(xq)
 
-        return xd.view_as(x)
+        return xd.view_as(x).cumsum(dim=1)
     
-    def encode(self, x : torch.Tensor):
-        xf = x.flatten(1)
+    def encode(self, x : torch.Tensor) -> torch.Tensor:
+        # take consecutive differences
+        xr = torch.cat((x[:, :1, :], torch.diff(x, dim=1)), dim=1)
+
+        xf = xr.flatten(1)
 
         xe = self.encoder(xf)
 
@@ -134,7 +157,7 @@ class LinearAutoencoder(nn.Module):
 
         return xq
     
-    def decode(self, xq : torch.Tensor):
+    def decode(self, xq : torch.Tensor) -> torch.Tensor:
         xd = self.decoder(xq)
 
         return xd
@@ -143,32 +166,28 @@ class LinearAutoencoder(nn.Module):
         print(f"TRANSPOSITON SHAPE {indices.shape}")
         print(f"\tVAL{indices}")
 
-        """
-        self.encoder_ffn[4].weight.data = self.encoder_ffn[4].weight.data[indices, :]
-        self.encoder_ffn[4].bias.data = self.encoder_ffn[4].bias.data[indices]
+        self.encoder.feed_forward[3].weight.data = self.encoder.feed_forward[3].weight.data[indices, :]
+        self.encoder.feed_forward[3].bias.data = self.encoder.feed_forward[3].bias.data[indices]
 
-        self.encoder_skip[1].weight.data = self.encoder_skip[1].weight.data[indices, :]
-        self.encoder_skip[1].bias.data = self.encoder_skip[1].bias.data[indices]
-        """
+        self.encoder.skip_linear[1].weight.data = self.encoder.skip_linear[1].weight.data[indices, :]
+        self.encoder.skip_linear[1].bias.data = self.encoder.skip_linear[1].bias.data[indices]
 
         self.fsq[0].running_mean.data = self.fsq[0].running_mean.data[indices]
         self.fsq[0].running_var.data = self.fsq[0].running_var.data[indices]
         self.fsq[0].weight.data = self.fsq[0].weight.data[indices]
         self.fsq[0].bias.data = self.fsq[0].bias.data[indices]
     
-        """
-        self.decoder_ffn[0].running_mean.data = self.decoder_ffn[0].running_mean.data[indices]
-        self.decoder_ffn[0].running_var.data = self.decoder_ffn[0].running_var.data[indices]
-        self.decoder_ffn[0].weight.data = self.decoder_ffn[0].weight.data[indices]
-        self.decoder_ffn[0].bias.data = self.decoder_ffn[0].bias.data[indices]
-        self.decoder_ffn[1].weight.data = self.decoder_ffn[1].weight.data[:, indices]
+        self.decoder.feed_forward[0].running_mean.data = self.decoder.feed_forward[0].running_mean.data[indices]
+        self.decoder.feed_forward[0].running_var.data = self.decoder.feed_forward[0].running_var.data[indices]
+        self.decoder.feed_forward[0].weight.data = self.decoder.feed_forward[0].weight.data[indices]
+        self.decoder.feed_forward[0].bias.data = self.decoder.feed_forward[0].bias.data[indices]
+        self.decoder.feed_forward[1].weight.data = self.decoder.feed_forward[1].weight.data[:, indices]
 
-        self.decoder_skip[0].running_mean.data = self.decoder_skip[0].running_mean.data[indices]
-        self.decoder_skip[0].running_var.data = self.decoder_skip[0].running_var.data[indices]
-        self.decoder_skip[0].weight.data = self.decoder_skip[0].weight.data[indices]
-        self.decoder_skip[0].bias.data = self.decoder_skip[0].bias.data[indices]
-        self.decoder_skip[1].weight.data = self.decoder_skip[1].weight.data[:, indices]
-        """
+        self.decoder.skip_linear[0].running_mean.data = self.decoder.skip_linear[0].running_mean.data[indices]
+        self.decoder.skip_linear[0].running_var.data = self.decoder.skip_linear[0].running_var.data[indices]
+        self.decoder.skip_linear[0].weight.data = self.decoder.skip_linear[0].weight.data[indices]
+        self.decoder.skip_linear[0].bias.data = self.decoder.skip_linear[0].bias.data[indices]
+        self.decoder.skip_linear[1].weight.data = self.decoder.skip_linear[1].weight.data[:, indices]
 
 
 acds = ActionChunkDataset()
@@ -181,8 +200,8 @@ dataloader = torch.utils.data.DataLoader(
 f = open("data/results.csv", "w")
 f.write("vocab_size,\tnum_tokens,\tMSE_loss,\tbpe_num_tokens,\tbpe_MSE_loss\n")
 f.flush()
-for vocab_size in [2]:#[16, 64, 256, 1024]:
-    for num_tokens in [48]:#[4, 8, 12, 16, 24]:
+for vocab_size in [16, 64, 256, 1024]:
+    for num_tokens in [4, 8, 12, 16, 24]:
         print(f"PROCESSING CONFIG VOCAB_SIZE={vocab_size}, NUM_TOKENS={num_tokens}")
 
         model = LinearAutoencoder(time_horizon=20, action_dim=7, vocab_size=vocab_size, num_tokens=num_tokens).to("cuda")
@@ -294,8 +313,8 @@ for vocab_size in [2]:#[16, 64, 256, 1024]:
         # move tokens [-1, 1]
         xq = (model.encode(all_input) * 2.0 / model.vocab_size).clamp(min=-1, max=1)
 
-        # (N, C) -> (N, 1, C) to put everything in one DCT channel
-        xq_np = xq.unsqueeze(1).detach().cpu().numpy()
+        # (N, C) -> (N, C, 1) to put everything in one DCT channel
+        xq_np = xq.unsqueeze(2).detach().cpu().numpy()
 
         tokenizer = AutoProcessor.from_pretrained("physical-intelligence/fast", trust_remote_code=True).fit(xq_np)
 
@@ -304,7 +323,7 @@ for vocab_size in [2]:#[16, 64, 256, 1024]:
         avg_seq_len = sum([len(tokens) for tokens in xq_tokenized]) / len(xq_tokenized)
 
         xd = model.decode(
-            torch.from_numpy(tokenizer.decode(xq_tokenized)).to("cuda").squeeze(1).float() * model.vocab_size / 2.0
+            torch.from_numpy(tokenizer.decode(xq_tokenized)).to("cuda").squeeze(2).float() * model.vocab_size / 2.0
         ).view_as(all_input)
 
         bpe_avg_l2 = F.mse_loss(xd, all_input.to("cuda"))
