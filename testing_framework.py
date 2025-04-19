@@ -23,6 +23,9 @@ class TrajectoryEncoder:
     def decode(self, data) -> torch.Tensor:
         raise NotImplementedError("decode method not implemented")
     
+    def differential_encode_decode(self, data) -> torch.Tensor:
+        raise NotImplementedError("differential_encode_decode not implemented! this encoder might not support such operation!")
+
 
 def train(model : TrajectoryEncoder, acds : ActionChunkDataset):
     dataloader = torch.utils.data.DataLoader(
@@ -49,8 +52,7 @@ def train(model : TrajectoryEncoder, acds : ActionChunkDataset):
 
             sample = sample.to("cuda")
 
-            enc = model.encode(sample)
-            output = model.decode(enc)
+            output = model.differential_encode_decode(sample)
 
             loss = torch.nn.functional.l1_loss(output, sample)
             loss.backward()
@@ -71,8 +73,7 @@ def train(model : TrajectoryEncoder, acds : ActionChunkDataset):
         for j, sample in enumerate(dataloader):
             sample = sample.to("cuda")
 
-            enc = model.encode(sample)
-            output = model.decode(enc)
+            output = model.differential_encode_decode(sample)
 
             loss = F.mse_loss(output, sample)
 
