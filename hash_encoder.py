@@ -55,6 +55,9 @@ class HashEncoder:
 acds = ActionChunkDataset()
 
 
+train_data = acds.train_split()
+test_data = acds.test_split()
+
 # comment to change between single hashing and multi hashing
 if False:
     print(f"Using single hash encoding")
@@ -66,20 +69,25 @@ if False:
 else:
     print(f"Using multi hash encoding")
 
-    mhe0 = HashEncoder(num_entries=4096, qbins=16, primes=hash_primes[0], chunks=acds.all_chunks)
-    mhe1 = HashEncoder(num_entries=4096, qbins=16, primes=hash_primes[1], chunks=acds.all_chunks)
+    mhe0 = HashEncoder(num_entries=4096, qbins=16, primes=hash_primes[0], chunks=train_data)
+    mhe1 = HashEncoder(num_entries=4096, qbins=16, primes=hash_primes[1], chunks=train_data)
 
     def multi_fetch(chunk : torch.Tensor) -> torch.Tensor:
         candidates = sorted(mhe0.fetch(chunk) + mhe1.fetch(chunk))
 
         for i in range(1, len(candidates)):
             if candidates[i] == candidates[i - 1]:
-                return candidates[i]
+                return train_data[candidates[i]]
             
-        raise RuntimeError("UNEXPECTED: NO SUITABLE CANDIDATE FOUND")
+        print("UNEXPECTED: NO SUITABLE CANDIDATE FOUND!")
+
+        # at least return something from the hashmap
+        # if there's nothing then return zero chunk
+        return train_data[candidates[0]] if len(candidates) > 0 else torch.zeros_like(chunk)
+
 
     reconstructed = torch.stack([
-        acds.all_chunks[multi_fetch(acds.all_chunks[i])] for i in tqdm.tqdm(range(acds.all_chunks.shape[0]))
+        multi_fetch(test_data[i]) for i in tqdm.tqdm(range(test_data.shape[0]))
     ])
     
-print(f"Reconstructed MSE loss was {F.mse_loss(reconstructed, acds.all_chunks)}")
+print(f"Reconstructed MSE loss was {F.mse_loss(reconstructed, test_data)}")

@@ -8,13 +8,14 @@ from data_stuff import ActionChunkDataset
 
 acds = ActionChunkDataset()
 print(acds.all_chunks)
-action_data = acds.all_chunks.numpy()
+train_data = acds.train_split().numpy()
+test_data = acds.test_split()
 
 print(f"Fitting tokenizer")
 tokenizer = AutoProcessor.from_pretrained("physical-intelligence/fast", trust_remote_code=True)
-tokenizer = tokenizer.fit(action_data)
+tokenizer = tokenizer.fit(train_data)
 
-tokens = tokenizer(action_data)
+tokens = tokenizer(test_data)
 
 
 
@@ -37,8 +38,8 @@ decoded_actions = tokenizer.decode(tokens, time_horizon=20, action_dim=7)
 
 decoded_actions = torch.from_numpy(decoded_actions)
 
-[ print(f"L2 loss was {F.mse_loss(acds.all_chunks[:, :, i], decoded_actions[:, :, i])}") for i in range(7) ]
-print(f"L2 loss was {F.mse_loss(acds.all_chunks, decoded_actions)}")
+[ print(f"L2 loss was {F.mse_loss(test_data[:, :, i], decoded_actions[:, :, i])}") for i in range(7) ]
+print(f"L2 loss was {F.mse_loss(test_data, decoded_actions)}")
 
 tot = 0
 for token in tokens:

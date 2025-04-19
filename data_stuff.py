@@ -51,6 +51,9 @@ class ActionChunkDataset(torch.utils.data.Dataset):
 
         self.train_mode = False
 
+        self.train_size = int(0.95 * self.all_chunks.shape[0])
+        self.test_size = self.all_chunks.shape[0] - self.train_size
+
     def __getitem__(self, index):
         if self.train_mode:
             return self.all_chunks[index]
@@ -59,6 +62,13 @@ class ActionChunkDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         if self.train_mode:
-            return int(0.95 * self.all_chunks.shape[0])
+            return self.train_size
         else:
-            return int(0.05 * self.all_chunks.shape[0])
+            return self.test_size
+        
+    def train_split(self):
+        return self.all_chunks[:self.train_size]
+
+    def test_split(self):
+        return self.all_chunks[self.train_size:]
+    
