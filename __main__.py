@@ -3,6 +3,7 @@ import testing_framework
 
 from hash_encoder import DoubleHashEncoder
 from baseline import FastEncoder
+from linear_autoencoder import LinearAutoencoder
 from data_stuff import ActionChunkDataset
 
 import torch.nn.functional as F
@@ -10,7 +11,8 @@ import torch.nn.functional as F
 acds = ActionChunkDataset()
 
 #model = DoubleHashEncoder(num_entries=4096, quant_bins=16)
-model = FastEncoder()
+model = LinearAutoencoder(time_horizon=20, action_dim=7, vocab_size=16, num_tokens=64)
+model = model.to("cuda")
 model.fit(acds)
 
 test_data = acds.test_split()

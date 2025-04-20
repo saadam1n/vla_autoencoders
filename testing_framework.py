@@ -9,7 +9,7 @@ from data_stuff import ActionChunkDataset
 
 class TrajectoryEncoder:
     def __init__(self):
-        pass
+        super().__init__()
 
     """
     It is assumed that fit takes care of *all* the training work 
@@ -27,61 +27,68 @@ class TrajectoryEncoder:
         raise NotImplementedError("differential_encode_decode not implemented! this encoder might not support such operation!")
 
 
-def train(model : TrajectoryEncoder, acds : ActionChunkDataset):
-    dataloader = torch.utils.data.DataLoader(
-        acds,
-        batch_size=512,
-        shuffle=True
-    )
+class TrajectoryNeuralEncoder(TrajectoryEncoder, nn.Module):
+    def __init__(self):
+        super(TrajectoryNeuralEncoder, self).__init__()
+        TrajectoryEncoder.__init__(self)
+        nn.Module.__init__(self)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
-    scheduler  = torch.optim.lr_scheduler.StepLR(optimizer, step_size=8, gamma=0.9)
+    def neural_train(self, acds : ActionChunkDataset):
+        acds.all_chunks = acds.all_chunks.to("cuda")
+        dataloader = torch.utils.data.DataLoader(
+            acds,
+            batch_size=512,
+            shuffle=True
+        )
 
-    num_epochs = 128
-    for i in range(num_epochs):
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.0001)
+        scheduler  = torch.optim.lr_scheduler.StepLR(optimizer, step_size=8, gamma=0.9)
 
-        print(f"Processing training for epoch {i}")
+        num_epochs = 128
+        for i in range(num_epochs):
 
-        sum_train_loss, sum_test_loss = 0.0
-        num_train_batches, num_test_batches = 0
+            print(f"Processing training for epoch {i}")
 
-        model.train()
-        acds.train_mode = True
-        for j, sample in enumerate(dataloader):
-            optimizer.zero_grad()
+            sum_train_loss, sum_test_loss = 0, 0
+            num_train_batches, num_test_batches = 0, 0
 
-            sample = sample.to("cuda")
+            self.train()
+            acds.train_mode = True
+            for j, sample in enumerate(dataloader):
+                optimizer.zero_grad()
 
-            output = model.differential_encode_decode(sample)
+                sample = sample.to("cuda")
 
-            loss = torch.nn.functional.l1_loss(output, sample)
-            loss.backward()
+                output = self.differential_encode_decode(sample)
 
-            optimizer.step()
+                loss = torch.nn.functional.l1_loss(output, sample)
+                loss.backward()
 
-            sum_train_loss += loss.item()
-            num_train_batches += 1
+                optimizer.step()
 
-        print(f"Average L1 loss across all train samples was {sum_train_loss / num_train_batches}")
+                sum_train_loss += loss.item()
+                num_train_batches += 1
 
-        print()
+            print(f"Average L1 loss across all train samples was {sum_train_loss / num_train_batches}")
 
-        print(f"Processing eval for epoch {i}")
+            print()
 
-        model.eval()
-        acds.train_mode = False
-        for j, sample in enumerate(dataloader):
-            sample = sample.to("cuda")
+            print(f"Processing eval for epoch {i}")
 
-            output = model.differential_encode_decode(sample)
+            self.eval()
+            acds.train_mode = False
+            for j, sample in enumerate(dataloader):
+                sample = sample.to("cuda")
 
-            loss = F.mse_loss(output, sample)
+                output = self.differential_encode_decode(sample)
 
-            sum_test_loss += loss.item()
-            num_test_batches += 1
+                loss = F.mse_loss(output, sample)
 
-        print(f"Average L2 loss across all eval samples was {sum_test_loss / num_test_batches}")
+                sum_test_loss += loss.item()
+                num_test_batches += 1
 
-        print("\n\n\n")
+            print(f"Average L2 loss across all eval samples was {sum_test_loss / num_test_batches}")
 
-        scheduler.step()
+            print("\n\n\n")
+
+            scheduler.step()
