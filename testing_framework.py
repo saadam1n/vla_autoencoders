@@ -41,10 +41,10 @@ class TrajectoryNeuralEncoder(TrajectoryEncoder, nn.Module):
             shuffle=True
         )
 
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.0001)
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
         scheduler  = torch.optim.lr_scheduler.StepLR(optimizer, step_size=8, gamma=0.9)
 
-        num_epochs = 128
+        num_epochs = 256
         for i in range(num_epochs):
 
             print(f"Processing training for epoch {i}")

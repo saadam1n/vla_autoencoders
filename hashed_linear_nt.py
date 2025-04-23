@@ -11,14 +11,13 @@ import dct
 
 from components import *
 
-
-class LinearAutoencoder(TrajectoryNeuralEncoder):
+class HashedLinearAutoencoder(TrajectoryNeuralEncoder):
     """
     time_horizon - number of actions within action chunk
     action_dim - number of dims per action
     """
     def __init__(self, time_horizon, action_dim, vocab_size, num_tokens, roundlu_vocab = None):
-        super(LinearAutoencoder, self).__init__()
+        super(HashedLinearAutoencoder, self).__init__()
 
         self.action_dim = action_dim
         self.time_horizon = time_horizon
@@ -29,12 +28,17 @@ class LinearAutoencoder(TrajectoryNeuralEncoder):
 
         self.encoder = FeedForwardReLU(features_in=self.total_chunk_size, features_out=self.num_tokens, expansion_ratio=8, roundlu_vocab=self.roundlu_vocab)
 
+        self.emb_vocab_size = 1024
+        self.emb_vocab_dim = 128
+
+        self.vocab_emb = nn.Embedding(num_embeddings=self.emb_vocab_size, embedding_dim=self.emb_vocab_dim)
+
         self.fsq = nn.Sequential(
             nn.BatchNorm1d(self.num_tokens), # switch running_mean and var
             FiniteScalarQuantization(self.vocab_size),
         )
 
-        self.decoder = FeedForwardReLU(features_in=self.num_tokens, features_out=self.total_chunk_size, expansion_ratio=8)
+        self.decoder = FeedForwardReLUInjectable(features_in=self.num_tokens, features_out=self.total_chunk_size, expansion_ratio=8, emb_dim=self.emb_vocab_dim)
 
         self.tokenizer = AutoProcessor.from_pretrained("physical-intelligence/fast", trust_remote_code=True)
 
@@ -44,7 +48,7 @@ class LinearAutoencoder(TrajectoryNeuralEncoder):
         self.eval()
 
         # neural transposition
-        all_input = acds.all_chunks.to("cuda")
+        all_input = acds.train_split().to("cuda")
 
         # neuron transposition
         expected_out = self.differential_encode_decode(all_input)
@@ -67,7 +71,7 @@ class LinearAutoencoder(TrajectoryNeuralEncoder):
         value_grad = get_value_grad().grad.abs().sum(dim=0)
         print(value_grad)
 
-        _, indices = torch.sort(value_grad, descending=True)
+        _, indices = torch.sort(value_grad[1:], descending=True)
         indices = indices.flatten()
 
         with torch.no_grad():
@@ -76,7 +80,7 @@ class LinearAutoencoder(TrajectoryNeuralEncoder):
         actual_out = self.differential_encode_decode(all_input)
         actual_fsq = self.differentiable_encode(all_input)
 
-        print(f"FSQ MSE loss from transpositon was {F.mse_loss(actual_fsq, expected_fsq[:, indices])}")
+        print(f"FSQ MSE loss from transpositon was {F.mse_loss(actual_fsq[:, 1:], expected_fsq[:, 1:][:, indices])}")
         print(f"TOT MSE loss from transpositon was {F.mse_loss(actual_out, expected_out)}")
         print(actual_fsq[0])
         print(expected_fsq[0, indices])
@@ -85,9 +89,12 @@ class LinearAutoencoder(TrajectoryNeuralEncoder):
         xd = self.differentiable_encode(all_input)
         xq_np = self.tokenization_prepare_encode(xd)
 
-        self.tokenizer = self.tokenizer.fit(xq_np)
+        self.tokenizer = self.tokenizer.fit(xq_np[:, 1:])
 
-        xq_tokenized = self.tokenizer(xq_np)
+        xq_tokenized = self.tokenizer(xq_np[:, 1:])
+
+        for i in range(len(xq_tokenized)):
+            xq_tokenized[i].insert(0, xq_np[i, 0].item())
 
         avg_seq_len = sum([len(tokens) for tokens in xq_tokenized]) / len(xq_tokenized)
 
@@ -104,7 +111,12 @@ class LinearAutoencoder(TrajectoryNeuralEncoder):
     def encode(self, data):
         enc = self.differentiable_encode(data)
 
-        enc = self.tokenizer(self.tokenization_prepare_encode(enc))
+        enc_old = enc
+
+        enc = self.tokenizer(self.tokenization_prepare_encode(enc[:, 1:]))
+
+        for i in range(len(enc)):
+            enc[i].insert(0, enc_old[i, 0].item())
 
         avg_len = sum([len(tokens) for tokens in enc]) / len(enc)
         print(f"Linear Autoencoder: average tokenized length was {avg_len}")
@@ -129,9 +141,16 @@ class LinearAutoencoder(TrajectoryNeuralEncoder):
         return xq_np
     
     def tokenization_prepare_decode(self, data):
-        xd = torch.from_numpy(self.tokenizer.decode(data)).to("cuda").float() * self.vocab_size / 2.0
+        hashes = [a[0] for a in data]
+        hashes = torch.Tensor(hashes).to("cuda").float().unsqueeze(1)
+
+        actual_data = [a[1:] for a in data]
+
+        xd = torch.from_numpy(self.tokenizer.decode(actual_data)).to("cuda").float() * self.vocab_size / 2.0
         
         xd = xd.squeeze(2)
+        
+        xd = torch.cat((hashes, xd), dim=1)
 
         return xd
 
@@ -147,16 +166,30 @@ class LinearAutoencoder(TrajectoryNeuralEncoder):
         return xd.view_as(x)
     
     def differentiable_encode(self, x : torch.Tensor) -> torch.Tensor:
+        hashes = dct.hash_dct_torch_batch(x, weights=dct.fast_hash_weights, num_entries=self.vocab_size)
+
         xf = x.flatten(1)
 
         xe = self.encoder(xf)
 
         xq = self.fsq(xe)
 
-        return xq
+        xhq = torch.cat((hashes, xq), dim=1)
+
+        return xhq
     
-    def differentiable_decode(self, xq : torch.Tensor) -> torch.Tensor:
-        xd = self.decoder(xq)
+    def differentiable_decode(self, xhq : torch.Tensor) -> torch.Tensor:
+        xh = xhq[:, :1]
+        xq = xhq[:, 1:]
+
+        xh = (xh + 0.5).int()
+
+        emb = self.vocab_emb(xh).squeeze(1)
+
+
+        xd = self.decoder(xq, emb)
+
+
 
         xd = xd.view(-1, self.time_horizon, self.action_dim)
 
