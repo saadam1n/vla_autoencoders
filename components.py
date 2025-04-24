@@ -130,7 +130,7 @@ class FiniteScalarQuantization(nn.Module):
     def __init__(self, num_bins):
         super(FiniteScalarQuantization, self).__init__()
 
-        self.quantization_granularity = num_bins - 1
+        self.quantization_granularity = num_bins / 2
 
     def forward(self, x: torch.Tensor):
         z = x.tanh() * self.quantization_granularity

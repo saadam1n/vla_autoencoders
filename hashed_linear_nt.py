@@ -89,14 +89,25 @@ class HashedLinearAutoencoder(TrajectoryNeuralEncoder):
         xd = self.differentiable_encode(all_input)
         xq_np = self.tokenization_prepare_encode(xd)
 
-        self.tokenizer = self.tokenizer.fit(xq_np[:, 1:])
+        self.tokenizer = self.tokenizer.fit(xq_np[:, :, 1:])
 
-        xq_tokenized = self.tokenizer(xq_np[:, 1:])
+        xq_tokenized = self.tokenizer(xq_np[:, :, 1:])
 
         for i in range(len(xq_tokenized)):
-            xq_tokenized[i].insert(0, xq_np[i, 0].item())
+            xq_tokenized[i].insert(0, xq_np[i, :, 0].item())
 
         avg_seq_len = sum([len(tokens) for tokens in xq_tokenized]) / len(xq_tokenized)
+
+        back_to_torch = self.tokenization_prepare_decode(xq_tokenized)
+
+        print("After transform: ")
+        print(xd[0] * 2 / self.vocab_size)
+        print("Input to the tokenizer:")
+        print(xq_np[0].flatten())
+        print("What we should get:")
+        print(xd[0])
+        print("What we got back:")
+        print(back_to_torch[0])
 
         xd = self.differentiable_decode(
             self.tokenization_prepare_decode(xq_tokenized)
@@ -105,15 +116,16 @@ class HashedLinearAutoencoder(TrajectoryNeuralEncoder):
 
 
         bpe_avg_l2 = F.mse_loss(xd, all_input.to("cuda"))
+        reg_avg_l2 = F.mse_loss(self.differential_encode_decode(all_input), all_input.to("cuda"))
 
-        print(f"BPE len was {avg_seq_len} and loss was {bpe_avg_l2}")
+        print(f"BPE len was {avg_seq_len} and L2 loss was {bpe_avg_l2} whereas original L2 was {reg_avg_l2}")
 
     def encode(self, data):
         enc = self.differentiable_encode(data)
 
         enc_old = enc
 
-        enc = self.tokenizer(self.tokenization_prepare_encode(enc[:, 1:]))
+        enc = self.tokenizer(self.tokenization_prepare_encode(enc)[:, :, 1:])
 
         for i in range(len(enc)):
             enc[i].insert(0, enc_old[i, 0].item())
@@ -131,12 +143,17 @@ class HashedLinearAutoencoder(TrajectoryNeuralEncoder):
         return dec
 
     def tokenization_prepare_encode(self, x : torch.Tensor):
+
         # tokenize entire dataset
         # move tokens [-1, 1]
-        xq = (x * 2.0 / self.vocab_size).clamp(min=-1, max=1)
+        xq = (x[:, 1:] * 2.0 / self.vocab_size).clamp(min=-1, max=1)
+
+        xq = torch.cat((x[:, :1], xq), dim=1)
+
+        self.old = x
 
         # (N, C) -> (N, C, 1) to put everything in one DCT channel
-        xq_np = xq.unsqueeze(2).detach().cpu().numpy()
+        xq_np = xq.unsqueeze(1).detach().cpu().numpy()
 
         return xq_np
     
@@ -148,9 +165,15 @@ class HashedLinearAutoencoder(TrajectoryNeuralEncoder):
 
         xd = torch.from_numpy(self.tokenizer.decode(actual_data)).to("cuda").float() * self.vocab_size / 2.0
         
-        xd = xd.squeeze(2)
-        
+        xd = xd.squeeze(1)
+
         xd = torch.cat((hashes, xd), dim=1)
+
+        err = F.l1_loss(xd, self.old)
+
+        print(f"Old err L1 was {err}")
+        for i in range(self.old.shape[1]):
+            print(f"\tDim {i} loss was {F.l1_loss(xd[:, i], self.old[:, i])}")
 
         return xd
 
