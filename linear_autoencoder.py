@@ -124,14 +124,14 @@ class LinearAutoencoder(TrajectoryNeuralEncoder):
         xq = (x * 2.0 / self.vocab_size).clamp(min=-1, max=1)
 
         # (N, C) -> (N, C, 1) to put everything in one DCT channel
-        xq_np = xq.unsqueeze(2).detach().cpu().numpy()
+        xq_np = xq.unsqueeze(1).detach().cpu().numpy()
 
         return xq_np
     
     def tokenization_prepare_decode(self, data):
         xd = torch.from_numpy(self.tokenizer.decode(data)).to("cuda").float() * self.vocab_size / 2.0
         
-        xd = xd.squeeze(2)
+        xd = xd.squeeze(1)
 
         return xd
 
