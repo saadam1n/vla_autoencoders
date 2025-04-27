@@ -91,6 +91,32 @@ class FeedForwardReLU(nn.Module):
 
         return output
 
+class FeedForwardGELU(nn.Module):
+    """Some Information about FeedForwardReLU"""
+    def __init__(self, features_in, features_out, expansion_ratio):
+        super(FeedForwardGELU, self).__init__()
+
+        features_latent = expansion_ratio * max(features_in, features_out)
+
+        self.feed_forward = nn.Sequential(
+            nn.BatchNorm1d(features_in),
+            nn.Linear(features_in, features_latent),
+            nn.GELU() ,
+            nn.Linear(features_latent, features_out)
+        )
+
+
+        self.skip_linear = nn.Sequential(
+            nn.BatchNorm1d(features_in),
+            nn.Linear(features_in, features_out)
+        ) if features_in != features_out else None
+
+    def forward(self, x):
+        skip = x if self.skip_linear is None else self.skip_linear(x)
+        output = self.feed_forward(x) + skip
+
+        return output
+
 class FeedForwardReLUInjectable(nn.Module):
     """Some Information about FeedForwardReLU"""
     def __init__(self, features_in, features_out, expansion_ratio, emb_dim = 0):
@@ -138,3 +164,41 @@ class FiniteScalarQuantization(nn.Module):
         zhat = z + (z.round() - z).detach()
 
         return zhat
+    
+
+class VQVAEBlock(nn.Module):
+    """Some Information about VQVAEBlock"""
+    def __init__(self, num_embeddings, embedding_dim):
+        super(VQVAEBlock, self).__init__()
+
+        self.embeddings = nn.Embedding(num_embeddings=num_embeddings, embedding_dim=embedding_dim)
+        self.beta = 0.25
+
+    """
+    Returns output and encoder loss
+    """
+    def forward(self, x : torch.Tensor):
+
+        # x is (N, L, C) tensor
+        # we want to get (N, L, E) distances and then select argmin
+        # we will need to use our good old friend broadcasting
+
+        # (N, L, C) -> (N, L, 1, C)
+        # (N, L, 1, C) - (E, C) = (N, L, E, C)
+        # (N, L, E, C) -> (N, L, E)
+        offsets = x.unsqueeze(2) - self.embeddings.weight
+        indices = (offsets ** 2).sum(dim=3).argmin(dim=2, keepdim=True)
+
+        # now a (N, C) vector
+        # detach so gradient doesn't flow to embeddings
+        quant = self.embeddings(indices).squeeze(2)
+
+        # compute loss
+        # essentially these losses force 
+        # due to the beta term we have to use two calls to mse_loss
+        vqloss = F.mse_loss(quant, x.detach()) + self.beta * F.mse_loss(x, quant.detach())
+
+        # apply stop gradient to make loss w.r.t. VQ VAE flow directly to encoder
+        sgquant = quant.detach() + x - x.detach()
+
+        return sgquant, vqloss

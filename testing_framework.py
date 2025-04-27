@@ -61,7 +61,15 @@ class TrajectoryNeuralEncoder(TrajectoryEncoder, nn.Module):
 
                 output = self.differential_encode_decode(sample)
 
+                auxloss = None
+                if isinstance(output, tuple):
+                    output, auxloss = output
+
                 loss = torch.nn.functional.l1_loss(output, sample)
+                
+                if auxloss is not None:
+                    loss = loss + auxloss
+
                 loss.backward()
 
                 optimizer.step()
@@ -81,6 +89,9 @@ class TrajectoryNeuralEncoder(TrajectoryEncoder, nn.Module):
                 sample = sample.to("cuda")
 
                 output = self.differential_encode_decode(sample)
+
+                if isinstance(output, tuple):
+                    output, _ = output
 
                 loss = F.mse_loss(output, sample)
 
